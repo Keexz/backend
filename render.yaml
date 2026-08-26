@@ -1,0 +1,19 @@
+services:
+  - type: web
+    name: humanizer-api
+    runtime: python
+    pythonVersion: "3.11.7"
+    plan: free
+    rootDir: backend
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn app.main:app --host 0.0.0.0 --port $PORT
+    healthCheckPath: /api/health
+    envVars:
+      - key: GROQ_API_KEY
+        value: PASTE_YOUR_GROQ_KEY_HERE
+      - key: RYNE_AI_URL
+        value: https://ryne.ai/api/humanizer/models/supernova
+      - key: RYNE_AI_API_KEY
+        value: PASTE_YOUR_RYNE_KEY_HERE
+      - key: ALLOWED_ORIGINS
+        value: https://YOUR-FRONTEND-DOMAIN.example
