@@ -16,4 +16,4 @@ services:
       - key: RYNE_AI_API_KEY
         value: PASTE_YOUR_RYNE_KEY_HERE
       - key: ALLOWED_ORIGINS
-        value: https://YOUR-FRONTEND-DOMAIN.example
+        value: https://humanizer-rose-beta.vercel.app
