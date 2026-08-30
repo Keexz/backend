@@ -9,8 +9,8 @@ from app.config import get_settings
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_TIMEOUT_SECONDS = 60.0
-DEFAULT_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
+DEFAULT_TIMEOUT_SECONDS = 90.0
+DEFAULT_BACKOFF_SECONDS = (5.0, 15.0, 30.0)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
 MAX_CHUNK_CHARS = 4000
 
