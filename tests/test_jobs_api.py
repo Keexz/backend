@@ -172,6 +172,8 @@ def test_download_before_ready_conflicts(monkeypatch):
 
 
 def test_groq_transport_is_wired_for_candidates(monkeypatch, build_docx):
+    # Groq removed per user request — highlight detection is direct without Groq fallback.
+    # Verify highlighted sentence is still humanized and Groq is no longer invoked.
     groq_transport, groq_requests = _groq_boundaries([])
     _install(monkeypatch, JobStore(), ryne=_ryne_ok(), groq=groq_transport)
     client = TestClient(app)
@@ -187,12 +189,10 @@ def test_groq_transport_is_wired_for_candidates(monkeypatch, build_docx):
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["status"] == "completed"
+    # Without Groq, PREFACE is not a protected section-title by rules, so Blue narrative remains humanizable
     assert body["total_paragraphs"] == 1
 
-    assert len(groq_requests) == 1
-    assert groq_requests[0]["model"] == "openai/gpt-oss-120b"
-    listing = groq_requests[0]["messages"][1]["content"]
-    assert "2. PREFACE" in listing
+    assert len(groq_requests) == 0
 
 
 def test_document_without_highlights_completes_with_zero_work(monkeypatch, build_docx):

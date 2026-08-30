@@ -2,9 +2,8 @@ import io
 import logging
 from collections import defaultdict
 
-from app.docx_engine import analyze_document, load_document, rebuild_sentence_infos
+from app.docx_engine import analyze_document, load_document
 from app.docx_rewriter import replace_paragraph_sentences
-from app.groq_client import apply_boundaries, classify_candidates, collect_candidates
 from app.job_store import Job, JobStatus, ParagraphOutcome
 from app.masking import mask_numbers_and_equations, unmask_text
 from app.ryne_client import (
@@ -17,7 +16,7 @@ from app.sentence import segment_sentences
 logger = logging.getLogger(__name__)
 
 
-def _groq_transport():
+def _groq_transport():  # kept for test compatibility, not used (Groq removed)
     return None
 
 
@@ -48,17 +47,9 @@ def process_job(
 
     analysis = analyze_document(document)
 
-    groq_result_transport = (
-        groq_transport if groq_transport is not None else _groq_transport()
-    )
-    candidates = collect_candidates(analysis)
-    if candidates:
-        boundaries = classify_candidates(candidates, transport=groq_result_transport)
-        apply_boundaries(analysis, boundaries)
-        # Groq may have changed protection; rebuild sentence infos accordingly
-        rebuild_sentence_infos(analysis, document)
-
     # Build sentence-level worklist: only unprotected + highlighted sentences
+    # Groq removed per request — protection is purely rule-based (Heading 1/2 + section titles),
+    # then directly detect highlighted sentences and send to Ryne.
     candidate_sentences = [s for s in analysis.sentences if s.has_highlight and not s.is_protected]
 
     # Filter equation/number-only sentences (deterministic masking check)
