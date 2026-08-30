@@ -20,6 +20,10 @@ class ParagraphOutcome:
     error: str | None = None
 
 
+# Sentence-level alias (same structure, clearer naming for new pipeline)
+SentenceOutcome = ParagraphOutcome
+
+
 @dataclass
 class Job:
     id: str
@@ -32,13 +36,31 @@ class Job:
     error: str | None = None
     output_bytes: bytes | None = None
 
+    @property
+    def total_sentences(self) -> int:
+        return self.total_paragraphs
+
+    @total_sentences.setter
+    def total_sentences(self, value: int) -> None:
+        self.total_paragraphs = value
+
+    @property
+    def processed_sentences(self) -> int:
+        return self.processed_paragraphs
+
+    @processed_sentences.setter
+    def processed_sentences(self, value: int) -> None:
+        self.processed_paragraphs = value
+
     def to_dict(self) -> dict:
         return {
             "job_id": self.id,
             "filename": self.filename,
             "status": self.status.value,
             "total_paragraphs": self.total_paragraphs,
+            "total_sentences": self.total_paragraphs,
             "processed_paragraphs": self.processed_paragraphs,
+            "processed_sentences": self.processed_paragraphs,
             "ai_scores": [
                 {"index": o.index, "ai_score": o.ai_score} for o in self.succeeded
             ],
