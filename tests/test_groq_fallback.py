@@ -95,27 +95,27 @@ def test_rejected_boundary_leaves_paragraph_humanizable(build_docx):
     assert analysis.humanizable_indices == [3]
 
 
-def test_api_failure_fails_safe_to_protected(build_docx):
+def test_api_failure_skips_groq_fallback(build_docx):
     analysis = _sample_analysis(build_docx)
     boundaries = classify_candidates(
         collect_candidates(analysis),
         api_key="test-key",
         transport=_failing_transport(),
     )
-    assert boundaries == {2}
+    assert boundaries == set()
 
     apply_boundaries(analysis, boundaries)
-    assert analysis.humanizable_indices == []
+    assert analysis.humanizable_indices == [3]
 
 
-def test_malformed_json_fails_safe_to_protected(build_docx):
+def test_malformed_json_skips_groq_fallback(build_docx):
     analysis = _sample_analysis(build_docx)
     boundaries = classify_candidates(
         collect_candidates(analysis),
         api_key="test-key",
         transport=_completion_transport("this is not json at all"),
     )
-    assert boundaries == {2}
+    assert boundaries == set()
 
 
 def test_out_of_range_boundary_indices_are_ignored(build_docx):

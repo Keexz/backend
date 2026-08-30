@@ -75,8 +75,11 @@ def classify_candidates(
         valid_indices = {candidate.index for candidate in candidates}
         confirmed = {int(i) for i in raw_indices if int(i) in valid_indices}
     except Exception:
-        logger.exception("Groq classification failed; applying fail-safe protection")
-        confirmed = {candidate.index for candidate in candidates}
+        logger.exception(
+            "Groq classification failed; skipping Groq fallback (no additional protection). "
+            "Rule-based protection remains."
+        )
+        confirmed = set()
 
     logger.info("Groq confirmed %d boundary candidate(s)", len(confirmed))
     return confirmed
