@@ -3,7 +3,12 @@ import json
 import httpx
 import pytest
 
-from app.ryne_client import HumanizeError, HumanizeResult, humanize_text
+from app.ryne_client import (
+    HumanizeError,
+    HumanizeResult,
+    _split_text_into_chunks,
+    humanize_text,
+)
 
 ZERO_BACKOFF = (0.0, 0.0, 0.0)
 
@@ -187,3 +192,88 @@ def test_empty_content_is_retried_until_failure():
             backoff_seconds=ZERO_BACKOFF,
         )
     assert len(requests) == 4
+
+
+def test_large_text_is_chunked():
+    sentence = "This is a test sentence. "
+    text = sentence * 200
+
+    def responder(request, n):
+        return httpx.Response(200, json={"content": f"chunk-{n}"})
+
+    transport, requests = _capturing_transport(responder)
+    result = humanize_text(
+        text,
+        api_key="key",
+        url="https://ryne.test/api",
+        transport=transport,
+        backoff_seconds=ZERO_BACKOFF,
+    )
+
+    assert len(requests) > 1
+    assert "chunk-1" in result.content
+    assert "chunk-2" in result.content
+    assert result.content == " ".join(f"chunk-{i}" for i in range(1, len(requests) + 1))
+
+
+def test_chunk_transient_error_recovers():
+    sentence = "This is a test sentence. "
+    text = sentence * 200
+
+    def responder(request, n):
+        if n == 1:
+            return httpx.Response(503, json={"error": "overloaded"})
+        return httpx.Response(200, json={"content": f"chunk-{n}"})
+
+    transport, requests = _capturing_transport(responder)
+    result = humanize_text(
+        text,
+        api_key="key",
+        url="https://ryne.test/api",
+        transport=transport,
+        backoff_seconds=ZERO_BACKOFF,
+    )
+
+    assert len(requests) == 3
+    assert result.content.startswith("chunk-2")
+    assert "chunk-3" in result.content
+
+
+def test_all_chunks_fail_raises_error():
+    sentence = "This is a test sentence. "
+    text = sentence * 200
+
+    def responder(request, n):
+        return httpx.Response(500, json={"error": "down"})
+
+    transport, requests = _capturing_transport(responder)
+    with pytest.raises(HumanizeError, match="failed after"):
+        humanize_text(
+            text,
+            api_key="key",
+            url="https://ryne.test/api",
+            transport=transport,
+            backoff_seconds=ZERO_BACKOFF,
+        )
+
+    assert len(requests) > 1
+
+
+def test_split_text_into_chunks_small_text():
+    chunks = _split_text_into_chunks("Short text.")
+    assert chunks == ["Short text."]
+
+
+def test_split_text_into_chunks_respects_sentence_boundaries():
+    text = "First sentence. Second sentence. Third sentence."
+    chunks = _split_text_into_chunks(text, max_chars=20)
+    assert len(chunks) > 1
+    assert "First" in chunks[0]
+    assert any("Second" in c or "Third" in c for c in chunks)
+
+
+def test_split_text_into_chunks_hard_splits_oversized_sentence():
+    long_sentence = "A" * 5000
+    chunks = _split_text_into_chunks(long_sentence, max_chars=1000)
+    assert len(chunks) == 5
+    assert all(len(c) == 1000 for c in chunks[:-1])

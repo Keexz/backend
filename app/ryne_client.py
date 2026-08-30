@@ -1,4 +1,5 @@
 import logging
+import re
 import time
 from dataclasses import dataclass
 
@@ -11,6 +12,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_TIMEOUT_SECONDS = 60.0
 DEFAULT_BACKOFF_SECONDS = (1.0, 2.0, 4.0)
 RETRYABLE_STATUS_CODES = {429, 500, 502, 503, 504}
+MAX_CHUNK_CHARS = 4000
 
 
 @dataclass(frozen=True)
@@ -34,6 +36,31 @@ def humanize_text(
     settings = get_settings()
     resolved_key = api_key if api_key is not None else settings.ryne_ai_api_key
     resolved_url = url if url is not None else settings.ryne_ai_url
+
+    if len(text) <= MAX_CHUNK_CHARS:
+        return _do_humanize(text, resolved_key, resolved_url, transport, backoff_seconds)
+
+    chunks = _split_text_into_chunks(text)
+    results = []
+    scores = []
+
+    for chunk in chunks:
+        result = _do_humanize(chunk, resolved_key, resolved_url, transport, backoff_seconds)
+        results.append(result.content)
+        if result.ai_score is not None:
+            scores.append(result.ai_score)
+
+    avg_score = sum(scores) / len(scores) if scores else None
+    return HumanizeResult(content=" ".join(results), ai_score=avg_score)
+
+
+def _do_humanize(
+    text: str,
+    resolved_key: str,
+    resolved_url: str,
+    transport: httpx.BaseTransport | None,
+    backoff_seconds: tuple[float, ...],
+) -> HumanizeResult:
     payload = {
         "text": text,
         "tone": "professional",
@@ -86,6 +113,33 @@ def humanize_text(
 
     attempts = len(backoff_seconds) + 1
     raise HumanizeError(f"Ryne AI failed after {attempts} attempts: {last_error}")
+
+
+def _split_text_into_chunks(text: str, max_chars: int = MAX_CHUNK_CHARS) -> list[str]:
+    if len(text) <= max_chars:
+        return [text]
+
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    chunks: list[str] = []
+    current = ""
+
+    for sentence in sentences:
+        if len(current) + len(sentence) + 1 <= max_chars:
+            current = (current + " " + sentence).strip()
+        else:
+            if current:
+                chunks.append(current)
+            if len(sentence) > max_chars:
+                for i in range(0, len(sentence), max_chars):
+                    chunks.append(sentence[i:i + max_chars])
+                current = ""
+            else:
+                current = sentence
+
+    if current:
+        chunks.append(current)
+
+    return chunks
 
 
 def _extract_error_detail(response: httpx.Response) -> str:
