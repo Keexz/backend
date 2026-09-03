@@ -4,6 +4,7 @@
 
 import io
 import logging
+import time
 from collections import defaultdict
 
 from app.docx_engine import (
@@ -36,15 +37,40 @@ def _ryne_backoff():
     return DEFAULT_BACKOFF_SECONDS
 
 
+# Check CPU only periodically so a 649-sentence job does not spend ~65s
+# just measuring CPU. Render free has 0.1 CPU, so one spike should not abort.
+CPU_CHECK_EVERY_N_SENTENCES = 10
+CPU_OVERLOAD_THRESHOLD = 80.0
+CPU_CONFIRM_ATTEMPTS = 3
+CPU_CONFIRM_DELAY_SECONDS = 1.0
+
+
+def _should_check_cpu(completed_count: int) -> bool:
+    # Check the first sentence, then every N sentences.
+    return (completed_count - 1) % CPU_CHECK_EVERY_N_SENTENCES == 0
+
+
 def _is_cpu_overloaded() -> bool:
-    # Check CPU before humanization without stopping the whole backend process.
+    # Non-blocking first read adds no load; confirm spikes twice before stopping.
     try:
         import psutil  # type: ignore
 
-        cpu = psutil.cpu_percent(interval=0.1)
-        if cpu > 80:
-            logger.warning("CPU %.1f%% is above the 80%% job limit", cpu)
-            return True
+        for attempt in range(CPU_CONFIRM_ATTEMPTS):
+            if attempt == 0:
+                cpu = psutil.cpu_percent(interval=None)
+            else:
+                time.sleep(CPU_CONFIRM_DELAY_SECONDS)
+                cpu = psutil.cpu_percent(interval=0.1)
+            if cpu <= CPU_OVERLOAD_THRESHOLD:
+                return False
+            logger.warning(
+                "CPU %.1f%% is above the %.0f%% job limit (check %d/%d)",
+                cpu,
+                CPU_OVERLOAD_THRESHOLD,
+                attempt + 1,
+                CPU_CONFIRM_ATTEMPTS,
+            )
+        return True
     except ImportError:
         logger.debug("psutil not installed — skipping CPU guard")
     except Exception:
@@ -103,11 +129,19 @@ def process_job(
     replacements_by_paragraph: dict[int, dict[int, str]] = defaultdict(dict)
     stopped_for_cpu = False
 
+    try:
+        import psutil  # type: ignore
+
+        psutil.cpu_percent(interval=None)
+    except Exception:
+        pass
+
     for completed_count, sentence in enumerate(worklist, start=1):
         job.status = JobStatus.HUMANIZING
 
-        # Stop before the next sentence when the server becomes too busy.
-        if _is_cpu_overloaded():
+        # Throttled guard: only measure every N sentences, and only stop
+        # after repeated high readings inside _is_cpu_overloaded().
+        if _should_check_cpu(completed_count) and _is_cpu_overloaded():
             stopped_for_cpu = True
             break
 
@@ -148,11 +182,6 @@ def process_job(
 
         job.processed_paragraphs = completed_count
         job.processed_sentences = completed_count
-
-    if stopped_for_cpu and not job.succeeded:
-        job.status = JobStatus.FAILED
-        job.error = "Server CPU usage is above 80%. Please retry this job shortly."
-        return
 
     if stopped_for_cpu:
         successful_indexes = {outcome.index for outcome in job.succeeded}

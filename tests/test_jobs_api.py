@@ -66,6 +66,9 @@ def _install(monkeypatch, store, ryne=None, groq=None):
         jobs_service, "_ryne_backoff", lambda: (0.0, 0.0, 0.0)
     )
     monkeypatch.setattr(jobs_service, "_is_cpu_overloaded", lambda: False)
+    # Small test docs have 1-2 sentences; check every sentence in tests.
+    # Production default stays at every 10 sentences.
+    monkeypatch.setattr(jobs_service, "CPU_CHECK_EVERY_N_SENTENCES", 1)
 
 
 def _upload(build_docx, specs=THESIS_SPECS, filename="thesis.docx"):
@@ -166,7 +169,9 @@ def test_corrupted_docx_marks_job_failed(monkeypatch, build_docx):
     assert client.get(f"/api/jobs/{job_id}/download").status_code == 409
 
 
-def test_cpu_overload_fails_job_without_losing_job_id(monkeypatch, build_docx):
+def test_cpu_overload_before_any_success_still_offers_download_with_markers(
+    monkeypatch, build_docx
+):
     store = JobStore()
     requests = []
 
@@ -183,12 +188,18 @@ def test_cpu_overload_fails_job_without_losing_job_id(monkeypatch, build_docx):
     status = client.get(f"/api/jobs/{job_id}")
 
     assert status.status_code == 200
-    assert status.json()["status"] == "failed"
-    assert status.json()["error"] == (
-        "Server CPU usage is above 80%. Please retry this job shortly."
-    )
+    assert status.json()["status"] == "partially_completed"
+    assert "above 80%" in (status.json()["error"] or "")
     assert requests == []
-    assert client.get(f"/api/jobs/{job_id}/download").status_code == 409
+
+    download = client.get(f"/api/jobs/{job_id}/download")
+    assert download.status_code == 200
+    document = load_document(download.content)
+    texts = [p.text for p in document.paragraphs]
+    assert texts[4] == "*First AI paragraph.*"
+    assert texts[5] == "*Second AI paragraph.*"
+    assert paragraph_has_asterisk(document.paragraphs[4]) is True
+    assert paragraph_has_asterisk(document.paragraphs[5]) is True
 
 
 def test_cpu_overload_downloads_completed_work_and_keeps_remaining_markers(
@@ -302,3 +313,33 @@ def test_document_without_markers_completes_with_zero_work(monkeypatch, build_do
     assert body["status"] == "completed"
     assert body["total_paragraphs"] == 0
     assert body["processed_paragraphs"] == 0
+
+
+def test_cpu_guard_checks_periodically(monkeypatch):
+    monkeypatch.setattr(jobs_service, "CPU_CHECK_EVERY_N_SENTENCES", 10)
+    assert jobs_service._should_check_cpu(1) is True
+    assert jobs_service._should_check_cpu(2) is False
+    assert jobs_service._should_check_cpu(10) is False
+    assert jobs_service._should_check_cpu(11) is True
+    assert jobs_service._should_check_cpu(21) is True
+
+
+def test_cpu_overload_requires_repeated_high_readings(monkeypatch):
+    import sys
+    import types
+
+    monkeypatch.setattr(jobs_service.time, "sleep", lambda seconds: None)
+
+    def _fake_psutil(readings):
+        module = types.SimpleNamespace()
+        values = list(readings)
+        module.cpu_percent = lambda interval=None: values.pop(0) if values else 0.0
+        return module
+
+    # Single spike then recovery should not stop the job.
+    monkeypatch.setitem(sys.modules, "psutil", _fake_psutil([85.0, 20.0]))
+    assert jobs_service._is_cpu_overloaded() is False
+
+    # Sustained high readings should stop the job.
+    monkeypatch.setitem(sys.modules, "psutil", _fake_psutil([85.0, 90.0, 95.0]))
+    assert jobs_service._is_cpu_overloaded() is True
