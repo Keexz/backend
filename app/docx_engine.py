@@ -1,5 +1,5 @@
 # This file finds AI-marked sentences and protected sections.
-# In simple terms: it reads each paragraph's plain text, looks for **double-asterisk**
+# In simple terms: it reads each paragraph's plain text, looks for *single-asterisk*
 # markers with regex, and maps them to sentences.
 
 import io
@@ -12,11 +12,10 @@ from docx.text.paragraph import Paragraph
 
 from app.sentence import SentenceSpan, segment_sentences
 
-# Regex for double-asterisk markers: **text** with non-empty content.
-# Single *text* is ignored; unmatched ** is ignored (no pair).
-ASTERISK_RE = re.compile(r"\*\*(.+?)\*\*")
-
-W_NS = "http://schemas.openxmlformats.org/wordprocessingml/2006/main"
+# Match *text* only when each delimiter is exactly one asterisk.
+# Double and unmatched asterisks are ignored.
+ASTERISK_RE = re.compile(r"(?<!\*)\*([^*\r\n]+?)\*(?!\*)")
+SINGLE_ASTERISK_RE = re.compile(r"(?<!\*)\*(?!\*)")
 
 EXACT_SECTION_TITLES = {
     "TITLE",
@@ -46,8 +45,7 @@ HEADING_STYLES = {"heading 1", "heading 2"}
 
 MAX_TITLE_LENGTH = 60
 
-# Kept for backward compat with old highlight API — not used for asterisk detection
-IGNORED_HIGHLIGHT_VALUES = {"none"}
+# Kept because the rewriter removes old shading from rewritten runs.
 IGNORED_SHADING_FILLS = {"", "auto", "ffffff"}
 
 
@@ -127,83 +125,26 @@ def _is_section_title(paragraph: Paragraph) -> bool:
 
 
 def paragraph_has_highlight(paragraph: Paragraph) -> bool:
-    # Primary: double-asterisk markers in plain text.
-    # In simple terms: look at paragraph.text and see if it contains **...**.
-    # Fallback: legacy blue highlight detection (kept for existing tests)
-    text = paragraph.text or ""
-    if ASTERISK_RE.search(text):
-        return True
-    return _has_legacy_highlight(paragraph)
+    # Keep the old function name so existing callers do not need to change.
+    return paragraph_has_asterisk(paragraph)
 
 
 def paragraph_has_asterisk(paragraph: Paragraph) -> bool:
-    # Strict asterisk-only check (no highlight fallback)
+    # Check the concatenated text so markers split across Word runs still work.
     text = paragraph.text or ""
     return bool(ASTERISK_RE.search(text))
 
 
-def _has_legacy_highlight(paragraph: Paragraph) -> bool:
-    for run_element in paragraph._p.findall(f".//{{{W_NS}}}r"):
-        rpr = run_element.find(f"{{{W_NS}}}rPr")
-        if rpr is None:
-            continue
-        for node in rpr.findall(f"{{{W_NS}}}highlight"):
-            value = (node.get(f"{{{W_NS}}}val") or "").lower()
-            if value and value not in IGNORED_HIGHLIGHT_VALUES:
-                return True
-        for node in rpr.findall(f"{{{W_NS}}}shd"):
-            fill = (node.get(f"{{{W_NS}}}fill") or "").lower()
-            if fill not in IGNORED_SHADING_FILLS:
-                return True
-    return False
-
-
-def _run_is_marked(run_element) -> bool:
-    # Legacy highlight check — retained for reference, not used in asterisk path.
-    rpr = run_element.find(f"{{{W_NS}}}rPr")
-    if rpr is None:
-        return False
-    for node in rpr.findall(f"{{{W_NS}}}highlight"):
-        value = (node.get(f"{{{W_NS}}}val") or "").lower()
-        if value and value not in IGNORED_HIGHLIGHT_VALUES:
-            return True
-    for node in rpr.findall(f"{{{W_NS}}}shd"):
-        fill = (node.get(f"{{{W_NS}}}fill") or "").lower()
-        if fill not in IGNORED_SHADING_FILLS:
-            return True
-    return False
-
-
-def _get_legacy_highlight_ranges(paragraph: Paragraph) -> list[tuple[int, int]]:
-    ranges: list[tuple[int, int]] = []
-    offset = 0
-    for run_element in paragraph._p.findall(f".//{{{W_NS}}}r"):
-        texts = [n.text or "" for n in run_element.findall(f".//{{{W_NS}}}t")]
-        run_text = "".join(texts)
-        run_len = len(run_text)
-        if run_len == 0:
-            continue
-        is_marked = _run_is_marked(run_element)
-        if is_marked:
-            ranges.append((offset, offset + run_len))
-        offset += run_len
-    return ranges
-
-
 def get_highlight_ranges(paragraph: Paragraph) -> list[tuple[int, int]]:
     """
-    Return list of (start, end) char offsets in paragraph.text where markers apply.
-    Union of ** asterisk ranges and legacy highlight ranges (for backward compat).
+    Keep the old function name while returning strict single-asterisk ranges.
     """
-    asterisk = get_asterisk_ranges(paragraph)
-    legacy = _get_legacy_highlight_ranges(paragraph)
-    # Merge; legacy and asterisk may overlap but treat as separate
-    return sorted(asterisk + legacy)
+    return get_asterisk_ranges(paragraph)
 
 
 def get_asterisk_ranges(paragraph: Paragraph) -> list[tuple[int, int]]:
     """
-    In simple terms: read the whole paragraph text, find every **...** pair,
+    In simple terms: read the whole paragraph text, find every *...* pair,
     and return where each pair starts and ends.
     """
     text = paragraph.text or ""
@@ -212,10 +153,15 @@ def get_asterisk_ranges(paragraph: Paragraph) -> list[tuple[int, int]]:
 
 def strip_asterisk_markers(text: str) -> str:
     """
-    Remove ** markers but keep inner content.
-    **foo** -> foo . Operates on full match ranges in reverse to keep offsets stable.
+    Remove paired single markers but keep inner content. *foo* becomes foo.
+    Double and unmatched asterisks stay unchanged.
     """
     return ASTERISK_RE.sub(r"\1", text)
+
+
+def strip_candidate_marker_characters(text: str) -> str:
+    """Remove single marker characters from a sentence already known to be marked."""
+    return SINGLE_ASTERISK_RE.sub("", text)
 
 
 def _sentence_has_highlight(span: SentenceSpan, highlight_ranges: list[tuple[int, int]]) -> bool:

@@ -3,10 +3,16 @@ from docx.enum.text import WD_ALIGN_PARAGRAPH
 from docx.oxml import parse_xml
 from docx.oxml.ns import nsdecls, qn
 
-from app.docx_engine import load_document, paragraph_has_highlight
+from app.docx_engine import load_document
 from app.docx_rewriter import replace_paragraph_text
 
 NEW_TEXT = "This sentence was rewritten by a human editor."
+
+
+def _has_legacy_marking(paragraph):
+    return any(run.font.highlight_color is not None for run in paragraph.runs) or bool(
+        paragraph._p.findall(f".//{qn('w:shd')}")
+    )
 
 
 def _load(data):
@@ -21,7 +27,7 @@ def test_replaces_text_and_strips_highlight(build_docx):
     replace_paragraph_text(paragraph, NEW_TEXT)
 
     assert paragraph.text == NEW_TEXT
-    assert paragraph_has_highlight(paragraph) is False
+    assert _has_legacy_marking(paragraph) is False
 
 
 def test_preserves_font_attributes(build_docx):
@@ -149,7 +155,7 @@ def test_shaded_run_formatting_preserved_and_marking_cleared(build_docx):
     )
     document = _load(data)
     paragraph = document.paragraphs[0]
-    assert paragraph_has_highlight(paragraph) is True
+    assert _has_legacy_marking(paragraph) is True
 
     replace_paragraph_text(paragraph, NEW_TEXT)
 
@@ -158,7 +164,7 @@ def test_shaded_run_formatting_preserved_and_marking_cleared(build_docx):
     assert run.font.name == "Georgia"
     assert run.font.size.pt == 12
     assert len(paragraph._p.findall(f".//{qn('w:shd')}")) == 0
-    assert paragraph_has_highlight(paragraph) is False
+    assert _has_legacy_marking(paragraph) is False
 
 
 def test_plain_unstyled_paragraph_gets_clean_default_run(build_docx):

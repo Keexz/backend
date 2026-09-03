@@ -36,7 +36,7 @@ def _sample_analysis(build_docx):
                     {"text": "CHAPTER ONE", "style": "Heading 1"},
                     {"text": "Intro body paragraph."},
                     {"text": "PREFACE"},
-                    {"text": "Preface narrative.", "highlighted": True},
+                    {"text": "*Preface narrative.*"},
                 ]
             )
         )

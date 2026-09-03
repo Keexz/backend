@@ -1,5 +1,5 @@
 # This file is the main worker for a humanizer job.
-# In simple terms: it loads the .docx, finds which sentences have ** markers,
+# In simple terms: it loads the .docx, finds which sentences have * markers,
 # checks CPU, sends each marked sentence to Ryne AI, then writes the result back.
 
 import io
@@ -7,7 +7,11 @@ import logging
 import os
 from collections import defaultdict
 
-from app.docx_engine import analyze_document, load_document, strip_asterisk_markers
+from app.docx_engine import (
+    analyze_document,
+    load_document,
+    strip_candidate_marker_characters,
+)
 from app.docx_rewriter import replace_paragraph_sentences
 from app.job_store import Job, JobStatus, ParagraphOutcome
 from app.masking import mask_numbers_and_equations, unmask_text
@@ -68,14 +72,14 @@ def process_job(
 
     analysis = analyze_document(document)
 
-    # Build sentence-level worklist: only unprotected + **-marked sentences
+    # Build sentence-level worklist: only unprotected + *-marked sentences
     # Groq removed per Interview Round 4 — protection is purely rule-based.
     candidate_sentences = [s for s in analysis.sentences if s.has_highlight and not s.is_protected]
 
-    # Filter equation/number-only sentences (check on stripped text, without **)
+    # Filter equation/number-only sentences after removing paired markers.
     worklist: list = []
     for s in candidate_sentences:
-        stripped = strip_asterisk_markers(s.text)
+        stripped = strip_candidate_marker_characters(s.text)
         mask_probe = mask_numbers_and_equations(stripped)
         if mask_probe.is_equation_only:
             logger.info("Skipping equation-only sentence %d in paragraph %d", s.global_index, s.paragraph_index)
@@ -98,8 +102,8 @@ def process_job(
     for completed_count, sentence in enumerate(worklist, start=1):
         job.status = JobStatus.HUMANIZING
 
-        # Strip ** before sending to Ryne — markers are not part of the language to humanize
-        stripped = strip_asterisk_markers(sentence.text)
+        # Strip paired single asterisks before sending the sentence to Ryne.
+        stripped = strip_candidate_marker_characters(sentence.text)
         mask_result = mask_numbers_and_equations(stripped)
         if mask_result.is_equation_only:
             job.processed_paragraphs = completed_count
@@ -148,8 +152,7 @@ def process_job(
             continue
         new_texts = []
         for s in para_sentences:
-            # If this sentence was humanized, use cleaned humanized text (no **).
-            # Otherwise keep original s.text which retains ** markers.
+            # Successful text has no markers; other text keeps its original markers.
             new_texts.append(repl_map.get(s.global_index, s.text))
         replace_paragraph_sentences(paragraph, new_texts)
 

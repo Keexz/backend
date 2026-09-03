@@ -1,6 +1,6 @@
 # This file rewrites paragraphs after humanization.
 # In simple terms: it replaces the old sentence text with the new humanized text,
-# keeping the same font (name, size, bold etc.) and removing ** markers only
+# keeping the same font (name, size, bold etc.) and removing * markers only
 # from sentences that were successfully humanized.
 
 from dataclasses import dataclass
@@ -50,8 +50,8 @@ def replace_paragraph_sentences(
     """
     Sentence-level rewriter. Replaces paragraph content with provided sentence_texts
     (one per segmented sentence, in document order). For successfully humanized
-    sentences the ** markers are already removed from sentence_texts by the caller;
-    failed/skipped sentences keep their ** markers in sentence_texts.
+    sentences the paired markers are already removed by the caller;
+    failed/skipped sentences keep their original markers.
     Formatting is preserved per-sentence using the first run overlapping that span.
     """
     if not sentence_texts:
@@ -65,7 +65,7 @@ def replace_paragraph_sentences(
     spans = segment_sentences(full_text)
     # If segmentation produced different count than provided texts, fall back to paragraph replacement
     if len(spans) != len(sentence_texts):
-        # Join with single space fallback — caller already stripped ** where needed
+        # Join with one space; the caller already stripped successful markers.
         replace_paragraph_text(paragraph, " ".join(sentence_texts))
         return
 

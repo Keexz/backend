@@ -2,70 +2,94 @@ import zipfile
 
 import pytest
 
-from app.docx_engine import _is_section_title, analyze_document, load_document, paragraph_has_highlight
+from app.docx_engine import (
+    _is_section_title,
+    analyze_document,
+    load_document,
+    paragraph_has_asterisk,
+    strip_candidate_marker_characters,
+    strip_asterisk_markers,
+)
 
 
 def _analyze(build_docx, specs):
     return analyze_document(load_document(build_docx(specs)))
 
 
-def test_blue_paragraph_is_humanizable(build_docx):
+def test_single_asterisk_paragraph_is_humanizable(build_docx):
     analysis = _analyze(
         build_docx,
         [
             {"text": "CHAPTER ONE", "style": "Heading 1"},
             {"text": "Plain intro sentence."},
-            {"text": "This finding was significant.", "highlighted": True},
+            {"text": "*This finding was significant.*"},
         ],
     )
     assert analysis.humanizable_indices == [2]
 
 
-def test_any_marker_color_is_detected(build_docx):
-    for color in ("cyan", "yellow", "green", "darkMagenta"):
-        analysis = _analyze(
-            build_docx,
-            [
-                {"text": "CHAPTER ONE", "style": "Heading 1"},
-                {"text": f"Marked in {color}.", "highlight_val": color},
-            ],
-        )
-        assert analysis.humanizable_indices == [1], color
-
-
-def test_character_shading_is_detected(build_docx):
+@pytest.mark.parametrize(
+    "text",
+    [
+        "**Double markers are ignored.**",
+        "*Unclosed marker is ignored.",
+        "Closing marker without an opener.*",
+        "****",
+    ],
+)
+def test_non_single_marker_patterns_are_ignored(build_docx, text):
     analysis = _analyze(
         build_docx,
         [
             {"text": "CHAPTER ONE", "style": "Heading 1"},
-            {"text": "Turnitin-style marked text.", "shade_fill": "B9E8F0"},
-        ],
-    )
-    assert analysis.humanizable_indices == [1]
-
-
-def test_white_shading_and_none_highlight_are_ignored(build_docx):
-    analysis = _analyze(
-        build_docx,
-        [
-            {"text": "CHAPTER ONE", "style": "Heading 1"},
-            {"text": "White shading.", "shade_fill": "FFFFFF"},
-            {"text": "Explicit none.", "highlight_val": "none"},
-            {"text": "Plain text."},
+            {"text": text},
         ],
     )
     assert analysis.humanizable_indices == []
 
 
-def test_partial_highlight_marks_whole_paragraph(build_docx):
+def test_legacy_highlight_and_shading_are_ignored(build_docx):
+    analysis = _analyze(
+        build_docx,
+        [
+            {"text": "CHAPTER ONE", "style": "Heading 1"},
+            {"text": "Highlighted text.", "highlighted": True},
+            {"text": "Shaded text.", "shade_fill": "B9E8F0"},
+        ],
+    )
+    assert analysis.humanizable_indices == []
+
+
+def test_single_markers_split_across_runs_are_detected(build_docx):
     analysis = _analyze(
         build_docx,
         [
             {"text": "CHAPTER ONE", "style": "Heading 1"},
             {
                 "runs": [
-                    ("Human-written start. ", False),
-                    ("AI-generated continuation.", True),
+                    ("Plain sentence. This ", False),
+                    ("*", False),
+                    ("marked phrase", False),
+                    ("*", False),
+                    (" is selected. Final plain sentence.", False),
+                ]
+            },
+        ],
+    )
+    assert analysis.humanizable_indices == [1]
+    assert analysis.humanizable_sentence_indices == [2]
+
+
+def test_partial_marker_selects_whole_sentence(build_docx):
+    analysis = _analyze(
+        build_docx,
+        [
+            {"text": "CHAPTER ONE", "style": "Heading 1"},
+            {
+                "runs": [
+                    ("Human-written start. AI-generated ", False),
+                    ("*continuation*", False),
+                    (" remains in this sentence.", False),
                 ]
             },
         ],
@@ -73,8 +97,27 @@ def test_partial_highlight_marks_whole_paragraph(build_docx):
     info = analysis.paragraphs[1]
     assert info.has_highlight is True
     assert info.is_protected is False
-    assert info.text == "Human-written start. AI-generated continuation."
+    assert info.text == "Human-written start. AI-generated *continuation* remains in this sentence."
     assert analysis.humanizable_indices == [1]
+    assert analysis.humanizable_sentence_indices == [2]
+
+
+def test_marker_stripping_only_removes_strict_single_pairs():
+    text = "Keep **double**, remove *single text*, and keep *unclosed."
+    assert strip_asterisk_markers(text) == "Keep **double**, remove single text, and keep *unclosed."
+
+
+def test_one_marker_pair_can_select_multiple_sentences(build_docx):
+    analysis = _analyze(
+        build_docx,
+        [
+            {"text": "CHAPTER ONE", "style": "Heading 1"},
+            {"text": "*First marked sentence. Second marked sentence.*"},
+        ],
+    )
+    assert analysis.humanizable_sentence_indices == [1, 2]
+    assert strip_candidate_marker_characters(analysis.sentences[1].text) == "First marked sentence."
+    assert strip_candidate_marker_characters(analysis.sentences[2].text) == "Second marked sentence."
 
 
 def test_front_matter_before_first_boundary_is_protected(build_docx):
@@ -85,9 +128,9 @@ def test_front_matter_before_first_boundary_is_protected(build_docx):
             {"text": "BY"},
             {"text": "JUNE, 2026"},
             {"text": "DECLARATION"},
-            {"text": "I hereby declare this work is original.", "highlighted": True},
+            {"text": "*I hereby declare this work is original.*"},
             {"text": "CHAPTER ONE", "style": "Heading 1"},
-            {"text": "Body text of chapter one.", "highlighted": True},
+            {"text": "*Body text of chapter one.*"},
         ],
     )
     assert all(info.is_protected for info in analysis.paragraphs[:6])
@@ -99,11 +142,11 @@ def test_protection_extends_until_next_heading(build_docx):
         build_docx,
         [
             {"text": "CHAPTER ONE", "style": "Heading 1"},
-            {"text": "Intro paragraph.", "highlighted": True},
+            {"text": "*Intro paragraph.*"},
             {"text": "REFERENCES"},
-            {"text": "Adams, J. (2020). Some book title.", "highlighted": True},
+            {"text": "*Adams, J. (2020). Some book title.*"},
             {"text": "CHAPTER TWO", "style": "Heading 1"},
-            {"text": "Next chapter content.", "highlighted": True},
+            {"text": "*Next chapter content.*"},
         ],
     )
     references_info = analysis.paragraphs[3]
@@ -126,7 +169,20 @@ def test_headings_are_always_protected(build_docx):
     assert analysis.paragraphs[1].protection_reason == "heading"
 
 
-def test_no_highlights_yields_empty_worklist(build_docx):
+def test_normal_style_chapter_text_is_not_a_boundary(build_docx):
+    analysis = _analyze(
+        build_docx,
+        [
+            {"text": "CHAPTER ONE"},
+            {"text": "*Marked body sentence.*"},
+        ],
+    )
+    assert analysis.paragraphs[0].is_heading is False
+    assert analysis.paragraphs[1].protection_reason == "front-matter"
+    assert analysis.humanizable_sentence_indices == []
+
+
+def test_no_asterisk_markers_yields_empty_worklist(build_docx):
     analysis = _analyze(
         build_docx,
         [
@@ -160,10 +216,15 @@ def test_section_title_matching(text, expected):
 
 
 def test_table_content_is_never_analyzed(build_docx_with_table):
-    data = build_docx_with_table("Blue text inside a table cell.")
+    data = build_docx_with_table("*Marked text inside a table cell.*")
     analysis = analyze_document(load_document(data))
     assert len(analysis.paragraphs) == 0
     assert analysis.humanizable_indices == []
+
+
+def test_paragraph_has_asterisk_ignores_double_markers(build_docx):
+    document = load_document(build_docx([{"text": "**Double only.**"}]))
+    assert paragraph_has_asterisk(document.paragraphs[0]) is False
 
 
 def test_corrupted_file_raises():

@@ -4,7 +4,7 @@ from fastapi.testclient import TestClient
 
 import app.jobs_service as jobs_service
 import app.routers.jobs as jobs_router
-from app.docx_engine import load_document, paragraph_has_highlight
+from app.docx_engine import load_document, paragraph_has_asterisk
 from app.job_store import JobStore
 from app.main import app
 
@@ -15,10 +15,10 @@ DOCX_MIME = (
 THESIS_SPECS = [
     {"text": "THE TITLE OF THE THESIS"},
     {"text": "DECLARATION"},
-    {"text": "I declare this work is original.", "highlighted": True},
+    {"text": "*I declare this work is original.*"},
     {"text": "CHAPTER ONE", "style": "Heading 1"},
-    {"text": "First AI paragraph.", "highlighted": True},
-    {"text": "Second AI paragraph.", "highlighted": True},
+    {"text": "*First AI paragraph.*"},
+    {"text": "*Second AI paragraph.*"},
 ]
 
 
@@ -63,6 +63,7 @@ def _install(monkeypatch, store, ryne=None, groq=None):
     monkeypatch.setattr(
         jobs_service, "_ryne_backoff", lambda: (0.0, 0.0, 0.0)
     )
+    monkeypatch.setattr(jobs_service, "_check_cpu_and_maybe_exit", lambda: None)
 
 
 def _upload(build_docx, specs=THESIS_SPECS, filename="thesis.docx"):
@@ -97,12 +98,38 @@ def test_full_job_lifecycle(monkeypatch, build_docx):
     document = load_document(download.content)
     texts = [p.text for p in document.paragraphs]
     assert texts[0] == "THE TITLE OF THE THESIS"
-    assert texts[2] == "I declare this work is original."
+    assert texts[2] == "*I declare this work is original.*"
     assert texts[4] == "Humanized body text."
     assert texts[5] == "Humanized body text."
-    assert not paragraph_has_highlight(document.paragraphs[4])
-    assert not paragraph_has_highlight(document.paragraphs[5])
-    assert paragraph_has_highlight(document.paragraphs[2]) is True
+    assert not paragraph_has_asterisk(document.paragraphs[4])
+    assert not paragraph_has_asterisk(document.paragraphs[5])
+    assert paragraph_has_asterisk(document.paragraphs[2]) is True
+
+
+def test_marker_pair_spanning_sentences_is_removed_before_ryne(monkeypatch, build_docx):
+    received_texts = []
+
+    def handler(request):
+        received_texts.append(request.read().decode())
+        return httpx.Response(200, json={"content": "Humanized.", "aiScore": 0})
+
+    _install(
+        monkeypatch,
+        JobStore(),
+        ryne=httpx.MockTransport(handler),
+    )
+    specs = [
+        {"text": "CHAPTER ONE", "style": "Heading 1"},
+        {"text": "*First marked sentence. Second marked sentence.*"},
+    ]
+
+    response = _upload(build_docx, specs=specs)
+    job_id = response.json()["job_id"]
+    body = TestClient(app).get(f"/api/jobs/{job_id}").json()
+
+    assert body["total_sentences"] == 2
+    assert len(received_texts) == 2
+    assert all("*" not in payload for payload in received_texts)
 
 
 def test_upload_rejects_non_docx_files(monkeypatch, build_docx):
@@ -149,8 +176,8 @@ def test_ryne_failures_reported_and_text_preserved(monkeypatch, build_docx):
 
     download = client.get(f"/api/jobs/{job_id}/download")
     document = load_document(download.content)
-    assert document.paragraphs[4].text == "First AI paragraph."
-    assert paragraph_has_highlight(document.paragraphs[4]) is True
+    assert document.paragraphs[4].text == "*First AI paragraph.*"
+    assert paragraph_has_asterisk(document.paragraphs[4]) is True
 
 
 def test_unknown_job_returns_404(monkeypatch):
@@ -171,9 +198,8 @@ def test_download_before_ready_conflicts(monkeypatch):
     assert response.status_code == 409
 
 
-def test_groq_transport_is_wired_for_candidates(monkeypatch, build_docx):
-    # Groq removed per user request — highlight detection is direct without Groq fallback.
-    # Verify highlighted sentence is still humanized and Groq is no longer invoked.
+def test_groq_transport_is_not_used_for_candidates(monkeypatch, build_docx):
+    # Verify marked text is humanized while Groq remains unused.
     groq_transport, groq_requests = _groq_boundaries([])
     _install(monkeypatch, JobStore(), ryne=_ryne_ok(), groq=groq_transport)
     client = TestClient(app)
@@ -182,26 +208,26 @@ def test_groq_transport_is_wired_for_candidates(monkeypatch, build_docx):
         {"text": "CHAPTER ONE", "style": "Heading 1"},
         {"text": "Intro."},
         {"text": "PREFACE"},
-        {"text": "Blue narrative.", "highlighted": True},
+        {"text": "*Marked narrative.*"},
     ]
     response = _upload(build_docx, specs=specs)
     job_id = response.json()["job_id"]
 
     body = client.get(f"/api/jobs/{job_id}").json()
     assert body["status"] == "completed"
-    # Without Groq, PREFACE is not a protected section-title by rules, so Blue narrative remains humanizable
+    # Without Groq, PREFACE is not a protected section-title, so the marker is eligible.
     assert body["total_paragraphs"] == 1
 
     assert len(groq_requests) == 0
 
 
-def test_document_without_highlights_completes_with_zero_work(monkeypatch, build_docx):
+def test_document_without_markers_completes_with_zero_work(monkeypatch, build_docx):
     _install(monkeypatch, JobStore(), ryne=_ryne_ok())
     client = TestClient(app)
 
     specs = [
         {"text": "CHAPTER ONE", "style": "Heading 1"},
-        {"text": "Nothing highlighted here."},
+        {"text": "Nothing marked here."},
     ]
     response = _upload(build_docx, specs=specs)
     job_id = response.json()["job_id"]
