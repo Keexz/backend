@@ -9,10 +9,14 @@ PLACEHOLDER_RE = re.compile(r"\[\[(?:NUM|EQ)_\d+\]\]")
 # Equation patterns (applied before number masking to avoid splitting equations)
 # 1. LaTeX inline $...$  (non-greedy)
 _EQ_DOLLAR_RE = re.compile(r"\$[^$]{1,300}?\$")
-# 2. Bracket math with digits and operators, e.g. "E = mc^2", "a = b + c", "3*x + 2 = 7"
-#    Heuristic: sequence containing digits/operators/= and at least one operator/=, length >=3
+# 2. Equations with values or variable names around mathematical operators.
+#    A minus sign must be followed by whitespace or a digit, so words like
+#    "inter-ethnic" are not mistaken for equations.
 _EQ_OPERATOR_RE = re.compile(
-    r"(?<![\w$])(?:[\w.\s]*\d[\w.\s]*[+\-*/=^<>]+\s*[\w\d\s+\-*/=^<>()]+)"
+    r"(?<![\w$])(?:[A-Za-z]\w*|\d+(?:\.\d+)?)\s*"
+    r"(?:[+*/=^<>]|-(?=\s|\d))\s*"
+    r"(?:[A-Za-z]\w*|\d+(?:\.\d+)?)"
+    r"(?:\s*[+\-*/=^<>]\s*(?:[A-Za-z]\w*|\d+(?:\.\d+)?))*"
 )
 
 # Number tokens: standalone numbers, decimals, comma-separated, percentages

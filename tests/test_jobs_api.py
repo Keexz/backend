@@ -1,3 +1,5 @@
+import json
+
 import httpx
 from docx import Document
 from fastapi.testclient import TestClient
@@ -106,11 +108,11 @@ def test_full_job_lifecycle(monkeypatch, build_docx):
     assert paragraph_has_asterisk(document.paragraphs[2]) is True
 
 
-def test_marker_pair_spanning_sentences_is_removed_before_ryne(monkeypatch, build_docx):
+def test_marker_pair_spanning_sentences_is_sent_as_clean_sentences(monkeypatch, build_docx):
     received_texts = []
 
     def handler(request):
-        received_texts.append(request.read().decode())
+        received_texts.append(json.loads(request.read())["text"])
         return httpx.Response(200, json={"content": "Humanized.", "aiScore": 0})
 
     _install(
@@ -128,8 +130,10 @@ def test_marker_pair_spanning_sentences_is_removed_before_ryne(monkeypatch, buil
     body = TestClient(app).get(f"/api/jobs/{job_id}").json()
 
     assert body["total_sentences"] == 2
-    assert len(received_texts) == 2
-    assert all("*" not in payload for payload in received_texts)
+    assert received_texts == [
+        "First marked sentence.",
+        "Second marked sentence.",
+    ]
 
 
 def test_upload_rejects_non_docx_files(monkeypatch, build_docx):

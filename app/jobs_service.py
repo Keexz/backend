@@ -1,6 +1,6 @@
 # This file is the main worker for a humanizer job.
-# In simple terms: it loads the .docx, finds which sentences have * markers,
-# checks CPU, sends each marked sentence to Ryne AI, then writes the result back.
+# In simple terms: it loads the .docx, finds sentences covered by * markers,
+# checks CPU, sends each marked sentence to Ryne AI, then writes it back.
 
 import io
 import logging
@@ -72,19 +72,27 @@ def process_job(
 
     analysis = analyze_document(document)
 
-    # Build sentence-level worklist: only unprotected + *-marked sentences
+    # Build the worklist from unprotected sentences overlapping valid markers.
     # Groq removed per Interview Round 4 — protection is purely rule-based.
-    candidate_sentences = [s for s in analysis.sentences if s.has_highlight and not s.is_protected]
+    candidate_sentences = [
+        sentence
+        for sentence in analysis.sentences
+        if sentence.has_highlight and not sentence.is_protected
+    ]
 
-    # Filter equation/number-only sentences after removing paired markers.
+    # Skip a sentence only when it contains no natural language after masking.
     worklist: list = []
-    for s in candidate_sentences:
-        stripped = strip_candidate_marker_characters(s.text)
+    for sentence in candidate_sentences:
+        stripped = strip_candidate_marker_characters(sentence.text)
         mask_probe = mask_numbers_and_equations(stripped)
         if mask_probe.is_equation_only:
-            logger.info("Skipping equation-only sentence %d in paragraph %d", s.global_index, s.paragraph_index)
+            logger.info(
+                "Skipping equation-only sentence %d in paragraph %d",
+                sentence.global_index,
+                sentence.paragraph_index,
+            )
             continue
-        worklist.append(s)
+        worklist.append(sentence)
 
     job.total_paragraphs = len(worklist)
     job.total_sentences = len(worklist)
@@ -96,13 +104,12 @@ def process_job(
     # CPU guard — runs before any Ryne calls (Render 0.1 CPU / 512 MB)
     _check_cpu_and_maybe_exit()
 
-    # Map paragraph_index -> {global_index -> humanized_text}
     replacements_by_paragraph: dict[int, dict[int, str]] = defaultdict(dict)
 
     for completed_count, sentence in enumerate(worklist, start=1):
         job.status = JobStatus.HUMANIZING
 
-        # Strip paired single asterisks before sending the sentence to Ryne.
+        # Remove marker characters before sending this sentence to Ryne.
         stripped = strip_candidate_marker_characters(sentence.text)
         mask_result = mask_numbers_and_equations(stripped)
         if mask_result.is_equation_only:
@@ -120,14 +127,19 @@ def process_job(
             )
         except HumanizeError as exc:
             logger.warning(
-                "Sentence %d (para %d) could not be humanized: %s", sentence.global_index, sentence.paragraph_index, exc
+                "Sentence %d in paragraph %d could not be humanized: %s",
+                sentence.global_index,
+                sentence.paragraph_index,
+                exc,
             )
             job.failures.append(
                 ParagraphOutcome(index=sentence.global_index, error=str(exc))
             )
         else:
             unmasked = unmask_text(result.content, mask_result.mapping)
-            replacements_by_paragraph[sentence.paragraph_index][sentence.global_index] = unmasked
+            replacements_by_paragraph[sentence.paragraph_index][
+                sentence.global_index
+            ] = unmasked
             job.succeeded.append(
                 ParagraphOutcome(index=sentence.global_index, ai_score=result.ai_score)
             )
@@ -135,25 +147,27 @@ def process_job(
         job.processed_paragraphs = completed_count
         job.processed_sentences = completed_count
 
-    # Rewrite paragraphs that have at least one successful replacement
-    for para_idx, repl_map in replacements_by_paragraph.items():
-        paragraph = document.paragraphs[para_idx]
-        para_sentences = [s for s in analysis.sentences if s.paragraph_index == para_idx]
-        if not para_sentences:
+    # Rebuild only paragraphs containing at least one successful sentence.
+    for paragraph_index, replacements in replacements_by_paragraph.items():
+        paragraph = document.paragraphs[paragraph_index]
+        paragraph_sentences = [
+            sentence
+            for sentence in analysis.sentences
+            if sentence.paragraph_index == paragraph_index
+        ]
+        if not paragraph_sentences:
             continue
+
         spans = segment_sentences(paragraph.text)
-        if len(spans) != len(para_sentences):
-            new_texts = []
-            for s in para_sentences:
-                new_texts.append(repl_map.get(s.global_index, s.text))
+        new_texts = [
+            replacements.get(sentence.global_index, sentence.text)
+            for sentence in paragraph_sentences
+        ]
+        if len(spans) != len(paragraph_sentences):
             from app.docx_rewriter import replace_paragraph_text
 
             replace_paragraph_text(paragraph, " ".join(new_texts))
             continue
-        new_texts = []
-        for s in para_sentences:
-            # Successful text has no markers; other text keeps its original markers.
-            new_texts.append(repl_map.get(s.global_index, s.text))
         replace_paragraph_sentences(paragraph, new_texts)
 
     buffer = io.BytesIO()

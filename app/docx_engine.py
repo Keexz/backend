@@ -160,7 +160,7 @@ def strip_asterisk_markers(text: str) -> str:
 
 
 def strip_candidate_marker_characters(text: str) -> str:
-    """Remove single marker characters from a sentence already known to be marked."""
+    """Remove marker characters from a sentence known to overlap a valid pair."""
     return SINGLE_ASTERISK_RE.sub("", text)
 
 

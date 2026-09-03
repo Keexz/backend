@@ -20,7 +20,7 @@ class ParagraphOutcome:
     error: str | None = None
 
 
-# Sentence-level alias (same structure, clearer naming for new pipeline)
+# Sentence-level alias for the sentence processing pipeline.
 SentenceOutcome = ParagraphOutcome
 
 
