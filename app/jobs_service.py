@@ -4,7 +4,6 @@
 
 import io
 import logging
-import os
 from collections import defaultdict
 
 from app.docx_engine import (
@@ -37,20 +36,20 @@ def _ryne_backoff():
     return DEFAULT_BACKOFF_SECONDS
 
 
-def _check_cpu_and_maybe_exit() -> None:
-    # Check CPU usage before humanization; if too high, restart service via os._exit(0)
-    # so Render restarts the free-tier instance. Interval 0.1s keeps the check fast.
+def _is_cpu_overloaded() -> bool:
+    # Check CPU before humanization without stopping the whole backend process.
     try:
         import psutil  # type: ignore
 
         cpu = psutil.cpu_percent(interval=0.1)
         if cpu > 80:
-            logger.warning("CPU %.1f%% > 80%% — restarting service via os._exit(0)", cpu)
-            os._exit(0)
+            logger.warning("CPU %.1f%% is above the 80%% job limit", cpu)
+            return True
     except ImportError:
         logger.debug("psutil not installed — skipping CPU guard")
     except Exception:
-        logger.exception("CPU check failed — continuing without restart")
+        logger.exception("CPU check failed — continuing without the guard")
+    return False
 
 
 def process_job(
@@ -101,13 +100,16 @@ def process_job(
         ryne_transport if ryne_transport is not None else _ryne_transport()
     )
 
-    # CPU guard — runs before any Ryne calls (Render 0.1 CPU / 512 MB)
-    _check_cpu_and_maybe_exit()
-
     replacements_by_paragraph: dict[int, dict[int, str]] = defaultdict(dict)
+    stopped_for_cpu = False
 
     for completed_count, sentence in enumerate(worklist, start=1):
         job.status = JobStatus.HUMANIZING
+
+        # Stop before the next sentence when the server becomes too busy.
+        if _is_cpu_overloaded():
+            stopped_for_cpu = True
+            break
 
         # Remove marker characters before sending this sentence to Ryne.
         stripped = strip_candidate_marker_characters(sentence.text)
@@ -147,7 +149,23 @@ def process_job(
         job.processed_paragraphs = completed_count
         job.processed_sentences = completed_count
 
-    # Rebuild only paragraphs containing at least one successful sentence.
+    if stopped_for_cpu and not job.succeeded:
+        job.status = JobStatus.FAILED
+        job.error = "Server CPU usage is above 80%. Please retry this job shortly."
+        return
+
+    if stopped_for_cpu:
+        successful_indexes = {outcome.index for outcome in job.succeeded}
+        for sentence in worklist:
+            if sentence.global_index in successful_indexes:
+                continue
+            # Give every unfinished sentence its own valid marker pair for retry.
+            retry_text = strip_candidate_marker_characters(sentence.text)
+            replacements_by_paragraph[sentence.paragraph_index][
+                sentence.global_index
+            ] = f"*{retry_text}*"
+
+    # Rebuild paragraphs containing successful text or normalized retry markers.
     for paragraph_index, replacements in replacements_by_paragraph.items():
         paragraph = document.paragraphs[paragraph_index]
         paragraph_sentences = [
@@ -174,7 +192,13 @@ def process_job(
     document.save(buffer)
     job.output_bytes = buffer.getvalue()
 
-    if job.failures:
+    if stopped_for_cpu:
+        job.status = JobStatus.PARTIALLY_COMPLETED
+        job.error = (
+            "Server CPU usage rose above 80%. Remaining marked sentences were "
+            "left unchanged and wrapped in asterisk markers for retry."
+        )
+    elif job.failures:
         job.status = JobStatus.COMPLETED_WITH_FAILURES
     else:
         job.status = JobStatus.COMPLETED

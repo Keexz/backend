@@ -10,6 +10,7 @@ class JobStatus(str, Enum):
     HUMANIZING = "humanizing"
     COMPLETED = "completed"
     COMPLETED_WITH_FAILURES = "completed_with_failures"
+    PARTIALLY_COMPLETED = "partially_completed"
     FAILED = "failed"
 
 

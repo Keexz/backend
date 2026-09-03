@@ -65,7 +65,7 @@ def _install(monkeypatch, store, ryne=None, groq=None):
     monkeypatch.setattr(
         jobs_service, "_ryne_backoff", lambda: (0.0, 0.0, 0.0)
     )
-    monkeypatch.setattr(jobs_service, "_check_cpu_and_maybe_exit", lambda: None)
+    monkeypatch.setattr(jobs_service, "_is_cpu_overloaded", lambda: False)
 
 
 def _upload(build_docx, specs=THESIS_SPECS, filename="thesis.docx"):
@@ -164,6 +164,68 @@ def test_corrupted_docx_marks_job_failed(monkeypatch, build_docx):
     assert body["error"] == "Uploaded file is not a valid .docx document."
 
     assert client.get(f"/api/jobs/{job_id}/download").status_code == 409
+
+
+def test_cpu_overload_fails_job_without_losing_job_id(monkeypatch, build_docx):
+    store = JobStore()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"content": "Unexpected call"})
+
+    _install(monkeypatch, store, ryne=httpx.MockTransport(handler))
+    monkeypatch.setattr(jobs_service, "_is_cpu_overloaded", lambda: True)
+    client = TestClient(app)
+
+    response = _upload(build_docx)
+    job_id = response.json()["job_id"]
+    status = client.get(f"/api/jobs/{job_id}")
+
+    assert status.status_code == 200
+    assert status.json()["status"] == "failed"
+    assert status.json()["error"] == (
+        "Server CPU usage is above 80%. Please retry this job shortly."
+    )
+    assert requests == []
+    assert client.get(f"/api/jobs/{job_id}/download").status_code == 409
+
+
+def test_cpu_overload_downloads_completed_work_and_keeps_remaining_markers(
+    monkeypatch, build_docx
+):
+    store = JobStore()
+    requests = []
+
+    def handler(request):
+        requests.append(request)
+        return httpx.Response(200, json={"content": "Humanized body text."})
+
+    _install(monkeypatch, store, ryne=httpx.MockTransport(handler))
+    cpu_checks = iter([False, True])
+    monkeypatch.setattr(jobs_service, "_is_cpu_overloaded", lambda: next(cpu_checks))
+    client = TestClient(app)
+    specs = [
+        {"text": "CHAPTER ONE", "style": "Heading 1"},
+        {"text": "*First AI sentence. Second AI sentence.*"},
+    ]
+
+    response = _upload(build_docx, specs=specs)
+    job_id = response.json()["job_id"]
+    body = client.get(f"/api/jobs/{job_id}").json()
+
+    assert body["status"] == "partially_completed"
+    assert body["processed_sentences"] == 1
+    assert body["total_sentences"] == 2
+    assert len(requests) == 1
+
+    download = client.get(f"/api/jobs/{job_id}/download")
+    assert download.status_code == 200
+    document = load_document(download.content)
+    assert document.paragraphs[1].text == (
+        "Humanized body text. *Second AI sentence.*"
+    )
+    assert paragraph_has_asterisk(document.paragraphs[1]) is True
 
 
 def test_ryne_failures_reported_and_text_preserved(monkeypatch, build_docx):
